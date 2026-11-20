@@ -1,0 +1,93 @@
+---
+apiVersion: tekton.dev/v1beta1
+kind: Pipeline
+metadata:
+  name: ci-cd-final-project
+spec:
+  description: Clone, lint, test, build, and deploy the Counter Service.
+  params:
+    - name: repo-url
+      type: string
+      description: Public Git repository URL.
+    - name: revision
+      type: string
+      default: main
+    - name: image-url
+      type: string
+      description: OpenShift internal registry image reference.
+  workspaces:
+    - name: source
+  tasks:
+    - name: cleanup
+      taskRef:
+        name: cleanup
+      workspaces:
+        - name: source
+          workspace: source
+
+    - name: clone
+      runAfter:
+        - cleanup
+      taskRef:
+        kind: ClusterTask
+        name: git-clone
+      params:
+        - name: url
+          value: $(params.repo-url)
+        - name: revision
+          value: $(params.revision)
+      workspaces:
+        - name: output
+          workspace: source
+
+    - name: lint
+      runAfter:
+        - clone
+      taskRef:
+        name: flake8
+      workspaces:
+        - name: source
+          workspace: source
+
+    - name: test
+      runAfter:
+        - lint
+      taskRef:
+        name: nose
+      workspaces:
+        - name: source
+          workspace: source
+
+    - name: build
+      runAfter:
+        - test
+      taskRef:
+        kind: ClusterTask
+        name: buildah
+      params:
+        - name: IMAGE
+          value: $(params.image-url)
+        - name: DOCKERFILE
+          value: ./Dockerfile
+        - name: CONTEXT
+          value: .
+        - name: TLSVERIFY
+          value: "false"
+      workspaces:
+        - name: source
+          workspace: source
+
+    - name: deploy
+      runAfter:
+        - build
+      taskRef:
+        kind: ClusterTask
+        name: openshift-client
+      params:
+        - name: SCRIPT
+          value: |
+            set -eu
+            oc create deployment counter-service --image="$(params.image-url)" --port=8000 --dry-run=client -o yaml | oc apply -f -
+            oc expose deployment counter-service --name=counter-service --port=8000 --target-port=8000 --dry-run=client -o yaml | oc apply -f -
+            oc expose service counter-service --name=counter-service-route --dry-run=client -o yaml | oc apply -f -
+            oc rollout status deployment/counter-service --timeout=180s
